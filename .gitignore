@@ -1,0 +1,8 @@
+/bin/
+/out/
+*.test
+.env
+.env.*
+
+# stray build binaries
+/webmcp

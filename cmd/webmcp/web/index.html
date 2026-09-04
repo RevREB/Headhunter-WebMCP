@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Headhunter</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.6 system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { margin-bottom: .25rem; }
+  .sub { opacity: .7; margin-top: 0; }
+  ul { padding-left: 1.2rem; }
+  code { background: color-mix(in srgb, currentColor 12%, transparent); padding: .1em .3em; border-radius: 4px; }
+</style>
+<h1>Headhunter</h1>
+<p class="sub">Dashboard + MCP surface over the Headhunter-Core API — Gen1 scaffold.</p>
+<h2>Tools</h2>
+<ul id="tools"><li>loading…</li></ul>
+<script>
+  fetch('/mcp/tools')
+    .then(r => r.json())
+    .then(d => {
+      const ul = document.getElementById('tools');
+      ul.innerHTML = '';
+      let tools = (d && d.tools) || d || [];
+      if (!Array.isArray(tools)) tools = [];
+      for (const t of tools) {
+        const li = document.createElement('li');
+        li.textContent = (t.name || t) + (t.description ? ' — ' + t.description : '');
+        ul.appendChild(li);
+      }
+      if (!ul.children.length) ul.innerHTML = '<li>no tools yet — Core not wired</li>';
+    })
+    .catch(e => { document.getElementById('tools').innerHTML = '<li>Core unavailable: ' + e + '</li>'; });
+</script>
+</html>
