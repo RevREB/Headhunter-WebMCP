@@ -1,23 +1,35 @@
 # Headhunter-WebMCP
 
-The dashboard and MCP surface for [Headhunter](https://github.com/RevREB/Headhunter-Core).
-Stateless: everything is read from and written through the **Headhunter-Core**
-API (`CORE_URL`). This is the Gen1 scaffold — a minimal dashboard plus a thin
-tool-manifest passthrough — that grows toward full feature parity over Phase 3.
+The browser tool for [Headhunter](https://github.com/RevREB/Headhunter-Core):
+a **headed Chromium exposed over MCP** that Core drives to fill and submit job
+applications, with a **noVNC desktop** so a human can watch and take over when a
+form needs an emailed code, a login, or a human attestation.
 
-## What it does
+Not a dashboard — the Headhunter UI is served by Core. This service is purely
+the browser Core calls as a tool.
 
-- Serves a minimal dashboard (`/`) that lists the tools exposed by Core.
-- Reverse-proxies `/api/*` to Core.
-- `/mcp/tools` mirrors Core's tool manifest. The full MCP protocol (tool calls
-  over streamable HTTP) will be served via the official Go MCP SDK in Phase 3.
+## Why headed real Chromium
 
-## Configuration
+- Anti-bot scoring (invisible reCAPTCHA v3 etc.) treats a real X-server session
+  far better than a fingerprintable headless one.
+- The one control that catches silently-empty submits on React ATS forms is a
+  **screenshot** of the filled field — a no-render engine can't produce it.
+
+## Pipeline
+
+`Xvfb -> fluxbox -> x11vnc -> noVNC (websockify) -> @playwright/mcp` (pinned).
+
+| Port | Purpose |
+|---|---|
+| 8931 | MCP (streamable HTTP) — Core connects here to drive the browser |
+| 6080 | noVNC — `kubectl -n headhunter port-forward svc/headhunter-webmcp 6080:6080` to watch/take over |
 
 | Env | Default | Purpose |
 |---|---|---|
-| `LISTEN_ADDR` | `:3000` | listen address |
-| `CORE_URL` | `http://headhunter-core.career-ops.svc.cluster.local:8080` | Headhunter-Core API |
+| `MCP_PORT` | `8931` | MCP listen port |
+| `VNC_PORT` | `6080` | noVNC listen port |
+| `SCREEN_GEOMETRY` | `1920x1080x24` | virtual display size |
+| `PW_EXTRA_ARGS` | — | extra flags passed to `@playwright/mcp` |
 
 ## License
 
