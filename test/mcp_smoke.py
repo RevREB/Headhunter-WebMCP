@@ -12,15 +12,22 @@ What this proves (the claims the README makes, in order):
      cannot fake;
   5. noVNC serves its client page, so the human take-over path exists.
 
+Note on the Host header: @playwright/mcp defaults --allowed-hosts to the host it
+is bound to and answers 403 to anything else, so every request here carries
+Host: localhost:<port>. That is a real part of the wire contract for any client,
+Core included -- see the host-header probe in .github/workflows/test.yml.
+
 Stdlib only, so it runs on a bare runner with no pip install.
 """
 
 import argparse
 import base64
 import json
+import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -56,8 +63,9 @@ def parse_body(raw, content_type):
 
 
 class MCPClient:
-    def __init__(self, url):
+    def __init__(self, url, host_header):
         self.url = url
+        self.host_header = host_header
         self.session_id = None
 
     def post(self, payload, timeout=60):
@@ -66,6 +74,11 @@ class MCPClient:
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": PROTOCOL_VERSION,
         }
+        # @playwright/mcp defaults --allowed-hosts to the host it is bound to
+        # and answers 403 "Access is only allowed at localhost:<port>" to
+        # anything else, so the Host header is part of the wire contract.
+        if self.host_header:
+            headers["Host"] = self.host_header
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         req = urllib.request.Request(
@@ -102,12 +115,12 @@ class MCPClient:
                 raise
 
 
-def connect(base, deadline):
+def connect(base, host_header, deadline):
     """Find the streamable-HTTP path and complete the handshake."""
-    last = ""
+    last = {}
     while time.time() < deadline:
         for path in CANDIDATE_PATHS:
-            client = MCPClient(base.rstrip("/") + path)
+            client = MCPClient(base.rstrip("/") + path, host_header)
             try:
                 result = client.call(
                     "initialize",
@@ -118,13 +131,20 @@ def connect(base, deadline):
                     },
                     timeout=20,
                 )
+            except urllib.error.HTTPError as exc:
+                last[path] = f"HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')[:200]}"
+                continue
             except Exception as exc:  # noqa: BLE001 - server may not be up yet
-                last = f"{path}: {type(exc).__name__}: {exc}"
+                last[path] = f"{type(exc).__name__}: {exc}"
                 continue
             client.notify("notifications/initialized")
             return client, result
         time.sleep(2)
-    raise SystemExit(f"could not complete an MCP initialize on {base} ({last})")
+    detail = "; ".join(f"{k} -> {v}" for k, v in last.items())
+    raise SystemExit(
+        f"could not complete an MCP initialize on {base} "
+        f"(Host: {host_header or 'default'}) [{detail}]"
+    )
 
 
 def texts(result):
@@ -146,11 +166,22 @@ def main():
     ap.add_argument("--vnc-base", default="http://127.0.0.1:6080")
     ap.add_argument("--page-url", required=True)
     ap.add_argument("--marker", default="WEBMCP-SMOKE-MARKER-9f31")
+    ap.add_argument(
+        "--host-header",
+        default="",
+        help="Host header to send; default localhost:<mcp port>, which is the "
+        "only value @playwright/mcp accepts unless --allowed-hosts is passed",
+    )
     ap.add_argument("--timeout", type=int, default=120)
     args = ap.parse_args()
 
+    host_header = args.host_header
+    if not host_header:
+        port = urllib.parse.urlsplit(args.mcp_base).port or 8931
+        host_header = f"localhost:{port}"
+
     print("== MCP handshake ==", flush=True)
-    client, init = connect(args.mcp_base, time.time() + args.timeout)
+    client, init = connect(args.mcp_base, host_header, time.time() + args.timeout)
     server = init.get("serverInfo", {})
     print(f"  endpoint {client.url}  server {json.dumps(server)}", flush=True)
     if init.get("protocolVersion"):
@@ -172,6 +203,7 @@ def main():
             fail(f"tool {name} missing", ", ".join(sorted(tools)))
     if all(name in tools for name in REQUIRED_TOOLS):
         print("== headed chromium renders a page ==", flush=True)
+        snapshot = ""
         try:
             nav = client.call(
                 "tools/call",
@@ -179,11 +211,11 @@ def main():
                 msg_id=3,
                 timeout=args.timeout,
             )
-            body = texts(nav)
+            snapshot = texts(nav)
             if nav.get("isError"):
-                fail("browser_navigate returned isError", body)
-            if args.marker not in body and "browser_snapshot" in tools:
-                body = texts(
+                fail("browser_navigate returned isError", snapshot)
+            if args.marker not in snapshot and "browser_snapshot" in tools:
+                snapshot = texts(
                     client.call(
                         "tools/call",
                         {"name": "browser_snapshot", "arguments": {}},
@@ -191,19 +223,69 @@ def main():
                         timeout=args.timeout,
                     )
                 )
-            if args.marker in body:
+            if args.marker in snapshot:
                 ok(f"page rendered: snapshot contains {args.marker}")
             else:
-                fail("marker absent from page snapshot", body)
+                fail("marker absent from page snapshot", snapshot)
         except Exception as exc:  # noqa: BLE001
             fail("browser_navigate raised", f"{type(exc).__name__}: {exc}")
+
+        # The product this container exists for is filling application forms,
+        # so drive one field the way Core would and read the value back.
+        print("== form fill ==", flush=True)
+        ref = re.search(r"textbox[^\n]*\[ref=(\w+)\]", snapshot)
+        if not ref or "browser_fill_form" not in tools:
+            print(
+                "  NOTE  no textbox ref in the snapshot; fill path not exercised",
+                flush=True,
+            )
+        else:
+            value = "Smoke Test Applicant"
+            try:
+                filled = client.call(
+                    "tools/call",
+                    {
+                        "name": "browser_fill_form",
+                        "arguments": {
+                            "fields": [
+                                {
+                                    "name": "Full name",
+                                    "type": "textbox",
+                                    "ref": ref.group(1),
+                                    "value": value,
+                                }
+                            ]
+                        },
+                    },
+                    msg_id=6,
+                    timeout=args.timeout,
+                )
+                after = texts(filled)
+                if filled.get("isError"):
+                    fail("browser_fill_form returned isError", after)
+                else:
+                    if value not in after:
+                        after = texts(
+                            client.call(
+                                "tools/call",
+                                {"name": "browser_snapshot", "arguments": {}},
+                                msg_id=7,
+                                timeout=args.timeout,
+                            )
+                        )
+                    if value in after:
+                        ok("typed value is readable back from the live page")
+                    else:
+                        fail("filled value not visible after fill", after)
+            except Exception as exc:  # noqa: BLE001
+                fail("browser_fill_form raised", f"{type(exc).__name__}: {exc}")
 
         print("== screenshot ==", flush=True)
         try:
             shot = client.call(
                 "tools/call",
                 {"name": "browser_take_screenshot", "arguments": {}},
-                msg_id=5,
+                msg_id=8,
                 timeout=args.timeout,
             )
             imgs = images(shot)

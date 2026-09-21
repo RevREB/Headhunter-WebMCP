@@ -121,6 +121,24 @@ jobs:
           docker exec webmcp sh -lc 'command -v xdpyinfo' \
             || echo "::warning::xdpyinfo missing from image; entrypoint readiness loop degrades to a fixed 10s sleep"
 
+      # Probe, not a gate. @playwright/mcp defaults --allowed-hosts to the host
+      # it is bound to and answers 403 to every other Host header, so a Core pod
+      # dialling the Kubernetes Service name gets 403 unless the deployment
+      # passes --allowed-hosts through PW_EXTRA_ARGS. Recorded here so the
+      # behaviour is visible rather than discovered in production.
+      - name: host-header policy probe
+        run: |
+          code=$(curl -s -o /tmp/hostprobe.txt -w '%{http_code}' \
+            -X POST http://127.0.0.1:8931/mcp \
+            -H 'Host: headhunter-webmcp:8931' \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}')
+          echo "service-style Host -> HTTP $code: $(head -c 200 /tmp/hostprobe.txt)"
+          if [ "$code" = "403" ]; then
+            echo "::warning::MCP rejects Host: headhunter-webmcp:8931 (403). A client reaching this pod by Service name needs --allowed-hosts via PW_EXTRA_ARGS."
+          fi
+
       - name: MCP smoke test
         run: |
           python3 test/mcp_smoke.py \
