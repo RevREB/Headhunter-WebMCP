@@ -1,0 +1,23 @@
+<!doctype html>
+<!-- Stand-in for an ATS application form. Deliberately boring: the point is a
+     stable marker string the accessibility snapshot must contain, and one real
+     input, so the smoke test proves Chromium rendered a page rather than that
+     the MCP server merely answered a list call. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>WEBMCP-SMOKE-FIXTURE</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; padding: 2rem; background: #fff; }
+      h1 { color: #123456; }
+    </style>
+  </head>
+  <body>
+    <h1>WEBMCP-SMOKE-MARKER-9f31</h1>
+    <form>
+      <label for="full-name">Full name</label>
+      <input id="full-name" name="full_name" type="text" />
+      <button type="button">Submit application</button>
+    </form>
+  </body>
+</html>

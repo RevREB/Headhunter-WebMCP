@@ -1,0 +1,138 @@
+# Tests for Headhunter-WebMCP.
+#
+# build.yml only proves the image *builds*. This proves it *works*: the
+# container is started and driven over MCP exactly the way Core drives it, and
+# a real screenshot has to come back out of a real headed Chromium.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: python -m pip install --quiet pyyaml
+
+      # --severity=warning, not the default: the single info-level finding in
+      # entrypoint.sh is SC2086 on ${PW_EXTRA_ARGS:-}, where word splitting is
+      # the documented point of the variable. Everything warning and above is
+      # a hard failure.
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck --severity=warning entrypoint.sh
+
+      - name: bash syntax
+        run: bash -n entrypoint.sh
+
+      # Advisory-by-design: fails only on hadolint *errors*, so the image's
+      # deliberate unpinned-apt warnings are printed without gating the repo.
+      - name: hadolint
+        run: |
+          docker run --rm -i hadolint/hadolint:latest-alpine \
+            hadolint --failure-threshold error - < Dockerfile
+
+      - name: contract tests
+        run: python -m unittest discover -s test -p '*_test.py' -v
+
+  smoke:
+    name: container smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Playwright base plus a second Chromium download is a large image;
+      # drop the runner's preinstalled SDKs so the build has room.
+      - name: reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup || true
+          df -h /
+
+      - name: build image
+        run: docker build -t headhunter-webmcp:ci .
+
+      # Stand-in for an ATS page. Served from the runner and reached over
+      # host-gateway, so the test exercises real navigation, not a data: URL.
+      - name: serve the fixture page
+        run: |
+          nohup python3 -m http.server 8099 --bind 0.0.0.0 \
+            --directory test/fixtures >/tmp/fixture-http.log 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8099/ats-form.html && break
+            sleep 0.5
+          done
+          curl -fsS -o /dev/null http://127.0.0.1:8099/ats-form.html
+
+      - name: start container
+        run: |
+          mkdir -p artifacts
+          docker run -d --name webmcp \
+            --add-host host.docker.internal:host-gateway \
+            -p 8931:8931 -p 6080:6080 \
+            -v "$PWD/artifacts:/data" \
+            headhunter-webmcp:ci
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:6080/vnc.html && break
+            sleep 2
+          done
+          docker logs webmcp 2>&1 | tail -40
+
+      # docker top reads the host process table, so this needs no ps/pgrep
+      # inside the image: it is evidence the Xvfb -> x11vnc -> noVNC chain
+      # survived startup rather than one stage dying quietly.
+      - name: pipeline processes are up
+        run: |
+          docker top webmcp
+          for proc in Xvfb x11vnc websockify; do
+            if docker top webmcp | grep -q "$proc"; then
+              echo "  PASS  $proc running"
+            else
+              echo "  FAIL  $proc not running"
+              exit 1
+            fi
+          done
+
+      # Advisory: the entrypoint's Xvfb readiness loop calls xdpyinfo. If the
+      # image lacks it the container still comes up, but the loop degrades to a
+      # fixed ~10s sleep instead of an actual readiness gate.
+      - name: xdpyinfo readiness probe available
+        run: |
+          docker exec webmcp sh -lc 'command -v xdpyinfo' \
+            || echo "::warning::xdpyinfo missing from image; entrypoint readiness loop degrades to a fixed 10s sleep"
+
+      - name: MCP smoke test
+        run: |
+          python3 test/mcp_smoke.py \
+            --page-url http://host.docker.internal:8099/ats-form.html
+
+      - name: container logs
+        if: always()
+        run: docker logs webmcp 2>&1 | tail -100
+
+      - name: tear down
+        if: always()
+        run: |
+          docker rm -f webmcp || true
+          docker image rm -f headhunter-webmcp:ci || true
+          sudo rm -rf artifacts

@@ -31,6 +31,23 @@ the browser Core calls as a tool.
 | `SCREEN_GEOMETRY` | `1920x1080x24` | virtual display size |
 | `PW_EXTRA_ARGS` | — | extra flags passed to `@playwright/mcp` |
 
+## Tests
+
+`.github/workflows/test.yml` runs on every PR and push to `main`:
+
+- **static** — `shellcheck` + `bash -n` on the entrypoint, `hadolint` on the
+  Dockerfile, and `test/contract_test.py`, which pins the drift that actually
+  bites here: the `@playwright/mcp` version baked into the image must be the one
+  the entrypoint execs, `EXPOSE` must match the ports the entrypoint listens on,
+  and every env var documented above must still be read by the entrypoint.
+- **smoke** — builds the image, starts the container, and drives it over MCP the
+  way Core does: initialize handshake, `tools/list`, navigate to a fixture page
+  served from the runner, assert the marker comes back in the accessibility
+  snapshot, and assert `browser_take_screenshot` returns real image bytes. Also
+  checks that Xvfb/x11vnc/websockify are alive and that noVNC serves `vnc.html`.
+
+Run the static half locally with `python3 -m unittest discover -s test -p '*_test.py' -v`.
+
 ## License
 
 MIT © 2026 RevREB. See [LICENSE](LICENSE).
